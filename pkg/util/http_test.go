@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"html/template"
 	"io"
 	"math/rand"
@@ -241,4 +242,54 @@ func TestParseProtoReader_GzipDecompressionBomb(t *testing.T) {
 	// proto unmarshal error (not an OOM). The key assertion is that we don't
 	// allocate 1 MB of memory.
 	assert.NotNil(t, err)
+}
+
+func TestParseProtoReader_OversizeBodyRejected(t *testing.T) {
+	var req cortexpb.WriteRequest
+	for i := range 100 {
+		req.Timeseries = append(req.Timeseries, cortexpb.PreallocTimeseries{TimeSeries: &cortexpb.TimeSeries{
+			Labels:  []cortexpb.LabelAdapter{{Name: "__name__", Value: fmt.Sprintf("metric_%03d", i)}, {Name: "job", Value: "probe"}},
+			Samples: []cortexpb.Sample{{Value: 1, TimestampMs: 1}},
+		}})
+	}
+	body, err := req.Marshal()
+	require.NoError(t, err)
+
+	var gz bytes.Buffer
+	gzw := gzip.NewWriter(&gz)
+	_, err = gzw.Write(body)
+	require.NoError(t, err)
+	require.NoError(t, gzw.Close())
+
+	for name, tc := range map[string]struct {
+		compression util.CompressionType
+		data        []byte
+	}{
+		"no compression": {util.NoCompression, body},
+		"gzip":           {util.Gzip, gz.Bytes()},
+	} {
+		for _, buffered := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s buffered=%v", name, buffered), func(t *testing.T) {
+				parse := func(maxSize int) error {
+					var r io.Reader = struct{ io.Reader }{bytes.NewReader(tc.data)}
+					if buffered {
+						r = bytesBuffered{bytes.NewBuffer(append([]byte(nil), tc.data...))}
+					}
+					var got cortexpb.WriteRequest
+					err := util.ParseProtoReader(context.Background(), r, -1, maxSize, &got, tc.compression)
+					if err == nil {
+						assert.Len(t, got.Timeseries, 100)
+					}
+					return err
+				}
+				// Every limit between the compressed and raw size must be rejected with a size error.
+				for maxSize := gz.Len(); maxSize < len(body); maxSize++ {
+					err := parse(maxSize)
+					require.Error(t, err, "maxSize=%d", maxSize)
+					require.Contains(t, err.Error(), "larger than max", "maxSize=%d", maxSize)
+				}
+				require.NoError(t, parse(len(body)))
+			})
+		}
+	}
 }

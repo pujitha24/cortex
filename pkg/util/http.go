@@ -181,7 +181,7 @@ func ParseProtoReader(ctx context.Context, reader io.Reader, expectedSize, maxSi
 
 func decompressRequest(reader io.Reader, expectedSize, maxSize int, compression CompressionType, sp opentracing.Span) (body []byte, err error) {
 	defer func() {
-		if err != nil && len(body) > maxSize {
+		if len(body) > maxSize {
 			err = fmt.Errorf(messageSizeLargerErrFmt, len(body), maxSize)
 		}
 	}()
@@ -254,6 +254,16 @@ func decompressFromBuffer(buffer *bytes.Buffer, maxSize int, compression Compres
 			return nil, err
 		}
 		return body, nil
+	case Gzip:
+		gzReader, err := gzip.NewReader(buffer)
+		if err != nil {
+			return nil, err
+		}
+		var out bytes.Buffer
+		if _, err := out.ReadFrom(io.LimitReader(gzReader, int64(maxSize)+1)); err != nil {
+			return nil, err
+		}
+		return out.Bytes(), nil
 	}
 	return nil, nil
 }
