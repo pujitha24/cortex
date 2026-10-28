@@ -802,8 +802,9 @@ func (i *Lifecycler) initRing(ctx context.Context) (bool, error) {
 		// OR unregister_on_shutdown=false
 		// if autoJoinOnStartup, move it into previous state based on token file (default: ACTIVE)
 		// to ensure the ingester joins the ring. else set to PENDING
-		if instanceDesc.State == LEAVING && len(instanceDesc.Tokens) != 0 {
-			if i.autoJoinOnStartup {
+		// If it has no tokens, there is nothing to keep: set it to PENDING so autoJoin generates new ones.
+		if instanceDesc.State == LEAVING {
+			if len(instanceDesc.Tokens) != 0 && i.autoJoinOnStartup {
 				instanceDesc.State = i.getPreviousState()
 			} else {
 				instanceDesc.State = PENDING

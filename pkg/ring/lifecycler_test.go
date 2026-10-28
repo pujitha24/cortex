@@ -1200,6 +1200,57 @@ func TestJoinInLeavingStateAndLessTokens(t *testing.T) {
 	})
 }
 
+func TestJoinInLeavingStateAndNoTokens(t *testing.T) {
+	ringStore, closer := consul.NewInMemoryClient(GetCodec(), log.NewNopLogger(), nil)
+	t.Cleanup(func() { assert.NoError(t, closer.Close()) })
+
+	var ringConfig Config
+	flagext.DefaultValues(&ringConfig)
+	ringConfig.KVStore.Mock = ringStore
+
+	r, err := New(ringConfig, "ingester", ringKey, log.NewNopLogger(), nil)
+	require.NoError(t, err)
+	require.NoError(t, services.StartAndAwaitRunning(context.Background(), r))
+	defer services.StopAndAwaitTerminated(context.Background(), r) //nolint:errcheck
+
+	cfg := testLifecyclerConfig(ringConfig, "ing1")
+	cfg.NumTokens = 2
+	cfg.MinReadyDuration = 1 * time.Nanosecond
+
+	// Set state as LEAVING with no tokens at all
+	err = r.KVClient.CAS(context.Background(), ringKey, func(in any) (any, bool, error) {
+		r := &Desc{
+			Ingesters: map[string]InstanceDesc{
+				"ing1": {
+					State: LEAVING,
+				},
+				"ing2": {
+					Tokens: []uint32{2, 3},
+				},
+			},
+		}
+
+		return r, true, nil
+	})
+	require.NoError(t, err)
+
+	l1, err := NewLifecycler(cfg, &nopFlushTransferer{}, "ingester", ringKey, true, true, log.NewNopLogger(), nil)
+	require.NoError(t, err)
+	require.NoError(t, services.StartAndAwaitRunning(context.Background(), l1))
+
+	// Check that the lifecycler generated new tokens and became ACTIVE
+	test.Poll(t, 1000*time.Millisecond, true, func() any {
+		d, err := r.KVClient.Get(context.Background(), ringKey)
+		require.NoError(t, err)
+
+		desc, ok := d.(*Desc)
+		return ok &&
+			len(desc.Ingesters) == 2 &&
+			desc.Ingesters["ing1"].State == ACTIVE &&
+			len(desc.Ingesters["ing1"].Tokens) == cfg.NumTokens
+	})
+}
+
 // JoinInJoiningState ensures that if the lifecycler starts up and the ring already has it in a JOINING state that it still is able to auto join
 func TestJoinInJoiningState(t *testing.T) {
 	ringStore, closer := consul.NewInMemoryClient(GetCodec(), log.NewNopLogger(), nil)
